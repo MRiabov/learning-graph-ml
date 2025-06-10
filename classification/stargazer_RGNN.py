@@ -15,7 +15,9 @@ class GRUGNN(MessagePassing):
         super().__init__(aggr="mean")
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.node_encoder = torch.nn.Linear(1, hidden_dim)  # how about identity/
+        self.node_encoder = torch.nn.Linear(1, hidden_dim)  # how about identity?
+
+        # note: this network uses a single layer to operate over any amount of weights.
         self.gru = nn.GRUCell(input_size=hidden_dim, hidden_size=hidden_dim)
         self.readout = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
