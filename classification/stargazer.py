@@ -15,7 +15,7 @@ class GRUGNN(MessagePassing):
         super().__init__(aggr="mean")
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
-        self.node_encoder = torch.nn.Linear(1, hidden_dim)#how about identity/
+        self.node_encoder = torch.nn.Linear(1, hidden_dim)  # how about identity/
         self.gru = nn.GRUCell(input_size=hidden_dim, hidden_size=hidden_dim)
         self.readout = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         batches.append(batch)
 
     # init model:
-    model = GRUGNN(hidden_dim=64, num_layers=2).to(device)
+    model = GRUGNN(hidden_dim=64, num_layers=8).to(device)
     optimizer = torch.optim.Adam(model.parameters())
     loss_fn = nn.BCELoss()
 
@@ -95,10 +95,10 @@ if __name__ == "__main__":
             optimizer.step()
 
             epoch_losses[batch_num] = loss.item()
-        print("epoch losses mean:", epoch_losses.mean())
+        print(f"epoch {epoch}/{epochs} losses mean:", epoch_losses.mean())
 
     # save net
-    torch.save(model, "classification/checkpoints/stargazer.pt")
+    torch.save(model, "classification/checkpoints/stargazer_8_layers.pt")
 
     # eval:
     model.eval()
@@ -133,3 +133,7 @@ if __name__ == "__main__":
             eval_precision[batch_num] = (out_targets == out).float().mean()
     print("eval precision:", eval_precision)
     print("eval precision mean:", eval_precision.mean())
+
+# 2 layers gives .6450 average precision.
+# 4 layers:  .6455
+# 8 layers: 0.6748
