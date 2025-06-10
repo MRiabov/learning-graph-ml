@@ -15,47 +15,71 @@ from torch_geometric.datasets import Planetoid
 import torch.nn.functional as F
 
 
-class GCNLayer(MessagePassing):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(aggr="sum")
 
-        self.lin1 = torch.nn.Linear(in_channels, out_channels)
-        # note: this network uses a single layer to operate over any amount of weights.
+class GATLayer(MessagePassing):
+    def __init__(self, in_channels, out_channels, heads=2):
+        super().__init__(aggr="sum")
+        self.heads = heads
+        self.out_channels = out_channels
+
+        # linear transformation for node features
+        self.lin = nn.Linear(in_channels, heads*out_channels, bias=False)
+
+        # Attention mechanism parameters
+        self.att = nn.Parameter(torch.Tensor(1, heads, 2 * out_channels))
+        nn.init.xavier_uniform_(self.att)
+
+        # Optional bias
+        self.bias = nn.Parameter(torch.Tensor(out_channels))
+        nn.init.zeros_(self.bias)
+        # ^note: # could be made nn.Linear but less efficient.
 
     def forward(self, x, edge_index):
         # Add self-loops to adjacency matrix
-        edge_index, _ = add_self_loops(edge_index=edge_index)
+        edge_index, _ = add_self_loops(edge_index=edge_index, num_nodes=x.size(0))
 
         # apply linear transformation
-        x = self.lin1(x)
+        x = self.lin(x)  # [num_nodes, heads*out_channels]
+        x = x.view(-1, self.heads, self.out_channels)  # num_nodes, heads, out_channels
 
-        row, col = edge_index
-        deg = degree(col, x.size(0), dtype=x.dtype)
-        deg_inv_sqrt = deg.pow(-0.5)
-        deg_inv_sqrt[deg_inv_sqrt == float("inf")] = 0
-        norm = deg_inv_sqrt[row] * deg_inv_sqrt[col]
+        # start propagating messages (calls "message" and "aggregate")
+        return self.propagate(edge_index, x=x)
 
-        # start propagating messages
-        return self.propagate(edge_index, x=x, norm=norm)
-
-    def message(self, x_j, norm):
+    def message(self, x_i, x_j, edge_index):
+        # x_i: target_node_features [num_edges]
         # x_j: features of source nodes [num_edges, out channels]
-        return norm.view(-1, 1) * x_j  # flatten and expand dims or something?
+        x_cat = torch.cat([x_i, x_j], dim=-1)
+
+        # Compute attention scores (e^T * [Wh_i || Wh_j])
+        alpha = (x_cat * self.att).sum(dim=-1)
+        alpha = F.leaky_relu(alpha, negative_slope=0.2)
+        # ^ ensure that even highly negative relationships are weighted less, but are still included (leaky relu.).
+        alpha = torch.exp(alpha - alpha.max())  # Numerical stability
+        alpha = alpha / (alpha.sum(dim=0, keepdim=True) + 1e-10)  # Softmax # normalize over edges for each head
+
+        # weight messages by attention.
+        return x_j * alpha.view(-1, self.heads, 1)  # [num_edges, heads, out_channels]
+
+    def update(self, aggr_out):
+        # aggregate across heads (mean or sum)
+        aggr_out = aggr_out.mean(dim=1)  # [num_nodes, out_channels]
+        aggr_out = aggr_out + self.bias
+        return aggr_out
 
 
-class GCN(nn.Module):
-    def __init__(self, num_features, hidden_dim, num_classes):
-        super(GCN, self).__init__()
-        self.conv1 = GCNLayer(num_features, hidden_dim)
-        self.conv2 = GCNLayer(hidden_dim, hidden_dim)
+class GAT(nn.Module):
+    def __init__(self, num_features, hidden_dim, num_classes, heads: int):
+        super(GAT, self).__init__()
+        self.gat1 = GATLayer(num_features, hidden_dim, heads=heads)
+        self.gat2 = GATLayer(hidden_dim, hidden_dim, heads=heads)
 
     def forward(self, data: Data):
         x, edge_index = data.x, data.edge_index
 
-        x = self.conv1(x, edge_index)
+        x = self.gat1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
-        out = self.conv2(x, edge_index)
+        out = self.gat2(x, edge_index)
         return out
 
 
@@ -70,13 +94,14 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # init model:
-    model = GCN(
+    model = GAT(
         num_features=data.num_features,
         hidden_dim=128,
         num_classes=batch_dataset.num_classes,
+        heads=2,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters())
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=5e-4)
     loss_fn = nn.CrossEntropyLoss()
 
     train_mask = data.train_mask
@@ -110,7 +135,7 @@ if __name__ == "__main__":
                 )
 
     # save net
-    torch.save(model, "classification/checkpoints/cora_gcn.pt")
+    torch.save(model, "classification/checkpoints/cora_gat.pt")
 
     # eval: # (here eval=test).
     model.eval()
