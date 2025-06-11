@@ -1,32 +1,27 @@
 import torch
-import torch_geometric
-from torch_geometric.data import Data, Batch
-from torch_geometric.nn import MessagePassing
-import json
-import pandas
-import numpy as np
 import torch.nn as nn
-from torch_geometric.nn import global_mean_pool
-import torch_geometric.nn as gnn
-from torch_geometric.transforms.normalize_features import NormalizeFeatures
-from torch_geometric.utils import add_self_loops, degree
-
-from torch_geometric.datasets import Planetoid
 import torch.nn.functional as F
+from torch_geometric.data import Data
+from torch_geometric.datasets import Planetoid
+from torch_geometric.nn import MessagePassing
+from torch_geometric.transforms.normalize_features import NormalizeFeatures
+from torch_geometric.utils import to_dense_batch
 
 
 class GraphSAGELayer(MessagePassing):
-    def __init__(self, in_channels, out_channels):
-        super().__init__(aggr="mean")
+    def __init__(self, in_channels, out_channels, lstm_hidden_dim):
+        super().__init__(aggr=None)
 
-        self.lin = torch.nn.Linear(in_channels * 2, out_channels)
+        self.lin = torch.nn.Linear(in_channels + lstm_hidden_dim, out_channels)
+        self.lstm = nn.LSTM(
+            input_size=in_channels, hidden_size=lstm_hidden_dim, batch_first=True
+        )
+        self.dropout = nn.Dropout(0.5)
+        self.norm = nn.LayerNorm(out_channels)
 
     def forward(self, x, edge_index):
         # save original node features to concatenate later
         self.x_self = x  # (num_nodes, in_channels)
-
-        # # Add self-loops to adjacency matrix if you want to include self-features in mean (optional in GraphSAGE)
-        # edge_index, _ = add_self_loops(edge_index=edge_index)
 
         # GCN uses symmetric normalization with degree matrices; *GraphSAGE does not*.
 
@@ -35,7 +30,51 @@ class GraphSAGELayer(MessagePassing):
 
     def message(self, x_j):
         # x_j: features of source nodes [num_edges, out channels]
-        return x_j
+        return x_j  # neighbor messages
+
+    def aggregate(self, inputs, index, ptr=None, dim_size=None):
+        # group inputs by index
+        # index: destination node for each edge (size=num_edges)
+
+        # group inputs by index
+        # we use scatter logic to create a list of sequences per node
+
+        # num_nodes = dim_size or int(index.max()) + 1
+        # neighbors = [[] for _ in range(num_nodes)]
+
+        # for i in range(index.size(0)):
+        #     node_id = index[i].item()
+        #     neighbors[node_id].append(inputs[i])
+
+        # # pad to equal length and process with lstm
+        # device = inputs.device
+        # lstm_outputs = []
+        # for seq in neighbors:
+        #     if len(seq) == 0:
+        #         # no neighbors: use zero
+        #         lstm_outputs.append(torch.zeros(self.lstm.hidden_size, device=device))
+        #     else:
+        #         seq_tensor = torch.stack(seq).unsqueeze(0)
+        #         _, (h_n, _) = self.lstm(seq_tensor)
+        #         lstm_outputs.append(h_n.squeeze((0,1)))
+        # out = torch.stack(lstm_outputs, dim=0)
+
+        # note: this ^ is a manual implementation with a for loop (inefficient). the more real implementation would be:
+        dense_inputs, mask = to_dense_batch(inputs, index, max_num_nodes=None)
+
+        lengths = mask.sum(dim=1).cpu()
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            dense_inputs,
+            lengths,  # lengths per node
+            batch_first=True,
+            enforce_sorted=False,
+        )
+
+        _, (h_n, _) = self.lstm(packed)
+
+        out = h_n.squeeze(0)
+
+        return out
 
     def update(self, aggr_out):
         # aggr_out: [num_nodes, in_channels]
@@ -43,14 +82,16 @@ class GraphSAGELayer(MessagePassing):
         concat = torch.cat([x_self, aggr_out], dim=1)  # concatenate self and neighbors.
         x = self.lin(concat)
         out = F.relu(x)
+        out = self.norm(out)
+        out = self.dropout(out)
         return out
 
 
 class GraphSAGE(nn.Module):
-    def __init__(self, num_features, hidden_dim, num_classes):
+    def __init__(self, num_features, hidden_dim, lstm_hidden_dim, num_classes):
         super(GraphSAGE, self).__init__()
-        self.conv1 = GraphSAGELayer(num_features, hidden_dim)
-        self.conv2 = GraphSAGELayer(hidden_dim, hidden_dim)
+        self.conv1 = GraphSAGELayer(num_features, hidden_dim, lstm_hidden_dim)
+        self.conv2 = GraphSAGELayer(hidden_dim, hidden_dim, lstm_hidden_dim)
 
     def forward(self, data: Data):
         x, edge_index = data.x, data.edge_index
@@ -73,7 +114,8 @@ if __name__ == "__main__":
     # init model:
     model = GraphSAGE(
         num_features=data.num_features,
-        hidden_dim=16,
+        hidden_dim=128,
+        lstm_hidden_dim=128,
         num_classes=batch_dataset.num_classes,
     ).to(device)
 
@@ -111,7 +153,7 @@ if __name__ == "__main__":
                 )
 
     # save net
-    torch.save(model, "classification/checkpoints/cora_graphSAGE.pt")
+    torch.save(model, "classification/checkpoints/cora_graphSAGE_lstm.pt")
 
     # eval: # (here eval=test).
     model.eval()
@@ -124,9 +166,15 @@ if __name__ == "__main__":
     print("eval precision:", eval_acc)
 
 # precision:
-# 120 epoch, 16 hidden_dim, mean aggr, with self-loops - .308 precision
+# 120 epoch,
+#  hidden_dim, mean aggr, with self-loops - .308 precision  # note: it could be random initialization.
 # 120 epoch, 128 hidden_dim, mean aggr, with self-loops - .458 precision
 # 120 epoch, 128 hidden_dim, mean aggr, *no self loops* - .708 precision (not bad!)
 # 120 epoch, 16 hidden_dim, mean aggr, no self-loops - very unstable, but .13~.504 (not enough features), avg~.350
+# 120 epoch, 16 hidden_dim , LSTM aggr (python for loops), no self-loops - .167
+# 120 epoch, 128 hidden_dim, LSTM aggr (python for loops), no self-loops - .167
+# 120 epoch, 128 hidden dim, LSTM aggr, efficient impl, + norm and dropout - .755, but takes >15 minutes to train (long)
 
-# note: 120 epoch, 16 hidden dim does not improve after 40 epoch.
+
+# note: 120 epoch,
+#  hidden dim does not improve after 40 epoch.
