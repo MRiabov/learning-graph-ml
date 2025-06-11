@@ -20,7 +20,6 @@ class GCNLayer(MessagePassing):
         super().__init__(aggr="sum")
 
         self.lin1 = torch.nn.Linear(in_channels, out_channels)
-        # note: this network uses a single layer to operate over any amount of weights.
 
     def forward(self, x, edge_index):
         # Add self-loops to adjacency matrix

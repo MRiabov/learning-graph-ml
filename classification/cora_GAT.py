@@ -28,7 +28,11 @@ class GATLayer(MessagePassing):
         # one parameter per head and out_channel
         self.att_targ = nn.Parameter(torch.Tensor(1, heads, out_channels))
         self.att_source = nn.Parameter(torch.Tensor(1, heads, out_channels))
-        # att_l - parameters of attention for
+        # att_targ - parameters of attention for target nodes (to which pass)
+        # att_source - parameters of attention for source nodes (from which pass)
+        # to compute attention in GAT they are multiplied with messages and summed; and softmax is applied.
+        # To pass the messages forward the softmaxed attention is multiplied with messages and messages are aggregated by their attention weight (aggregated e.g. summed.)
+        # (the aggregated messages are passed forward with `propagate` function consisting of - `message`, `aggregate` and `update`)
 
         # Optional bias
         self.bias = nn.Parameter(torch.Tensor(out_channels))
@@ -167,3 +171,6 @@ if __name__ == "__main__":
 # aggregate() - Gathers those messages at each target node (sum/mean/max over incoming edges).
 # update() -Takes the aggregated result and “finishes” it—e.g. applies bias, non-linearities, normalization, or (here) collapses the attention heads.
 # """
+
+# note: cora dataset is considered the MNIST of graph based learning. It probably means it's not the most complex one.
+# it has only 7 classes and 1433 binary features per vector (although the 1433 binary features is OK.)
