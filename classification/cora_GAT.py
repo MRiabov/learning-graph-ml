@@ -1,38 +1,45 @@
-import torch
-import torch_geometric
-from torch_geometric.data import Data, Batch
-from torch_geometric.nn import MessagePassing
 import json
-import pandas
+
 import numpy as np
+import pandas
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torch_geometric
+from torch_geometric.data import Batch, Data
+from torch_geometric.datasets import Planetoid
+from torch_geometric.nn import MessagePassing
 from torch_geometric.nn import global_mean_pool
 import torch_geometric.nn as gnn
 from torch_geometric.transforms.normalize_features import NormalizeFeatures
-from torch_geometric.utils import add_self_loops, degree
-
-from torch_geometric.datasets import Planetoid
-import torch.nn.functional as F
-
+from torch_geometric.utils import add_self_loops, degree, softmax
 
 
 class GATLayer(MessagePassing):
     def __init__(self, in_channels, out_channels, heads=2):
-        super().__init__(aggr="sum")
+        super().__init__(aggr="sum", node_dim=0)
         self.heads = heads
         self.out_channels = out_channels
 
         # linear transformation for node features
-        self.lin = nn.Linear(in_channels, heads*out_channels, bias=False)
+        self.lin = nn.Linear(in_channels, heads * out_channels, bias=False)
 
         # Attention mechanism parameters
-        self.att = nn.Parameter(torch.Tensor(1, heads, 2 * out_channels))
-        nn.init.xavier_uniform_(self.att)
+        # one parameter per head and out_channel
+        self.att_targ = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_source = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        # att_l - parameters of attention for
 
         # Optional bias
         self.bias = nn.Parameter(torch.Tensor(out_channels))
-        nn.init.zeros_(self.bias)
+        self.reset_parameters()
         # ^note: # could be made nn.Linear but less efficient.
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.att_targ)
+        nn.init.xavier_uniform_(self.att_source)
+        nn.init.xavier_uniform_(self.lin.weight)
+        nn.init.zeros_(self.bias)
 
     def forward(self, x, edge_index):
         # Add self-loops to adjacency matrix
@@ -45,20 +52,20 @@ class GATLayer(MessagePassing):
         # start propagating messages (calls "message" and "aggregate")
         return self.propagate(edge_index, x=x)
 
-    def message(self, x_i, x_j, edge_index):
+    def message(
+        self, x_i, x_j, index, ptr, size_i
+    ):  # rename edge_index to index for softmax
         # x_i: target_node_features [num_edges]
         # x_j: features of source nodes [num_edges, out channels]
-        x_cat = torch.cat([x_i, x_j], dim=-1)
+        # x_cat = torch.cat([x_i, x_j], dim=-1)
 
         # Compute attention scores (e^T * [Wh_i || Wh_j])
-        alpha = (x_cat * self.att).sum(dim=-1)
+        alpha = (x_i * self.att_targ).sum(dim=-1) + (x_j * self.att_source).sum(-1)
         alpha = F.leaky_relu(alpha, negative_slope=0.2)
         # ^ ensure that even highly negative relationships are weighted less, but are still included (leaky relu.).
-        alpha = torch.exp(alpha - alpha.max())  # Numerical stability
-        alpha = alpha / (alpha.sum(dim=0, keepdim=True) + 1e-10)  # Softmax # normalize over edges for each head
-
+        alpha = softmax(alpha, index, ptr, size_i)  # note: PyG softmax on index
         # weight messages by attention.
-        return x_j * alpha.view(-1, self.heads, 1)  # [num_edges, heads, out_channels]
+        return x_j * alpha.unsqueeze(-1)  # [num_edges, heads, out_channels]
 
     def update(self, aggr_out):
         # aggregate across heads (mean or sum)
@@ -71,7 +78,7 @@ class GAT(nn.Module):
     def __init__(self, num_features, hidden_dim, num_classes, heads: int):
         super(GAT, self).__init__()
         self.gat1 = GATLayer(num_features, hidden_dim, heads=heads)
-        self.gat2 = GATLayer(hidden_dim, hidden_dim, heads=heads)
+        self.gat2 = GATLayer(hidden_dim, num_classes, heads=heads)
 
     def forward(self, data: Data):
         x, edge_index = data.x, data.edge_index
@@ -98,10 +105,10 @@ if __name__ == "__main__":
         num_features=data.num_features,
         hidden_dim=128,
         num_classes=batch_dataset.num_classes,
-        heads=2,
+        heads=4,
     ).to(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.005, weight_decay=5e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.0005, weight_decay=5e-4)
     loss_fn = nn.CrossEntropyLoss()
 
     train_mask = data.train_mask
@@ -148,6 +155,15 @@ if __name__ == "__main__":
     print("eval precision:", eval_acc)
 
 # precision:
-# 200epoch, 64 hidden_dim - .778 precision
-# 200 epoch, 128 hidden_dim - .801 precision
-# 200 epoch, 3 layers, 128 hidden_dim - .7803 - eval precision actually dropped.
+# 200 epoch, 128 hidden_dim, lr = 0.005 - .608 precision # 2 heads
+# 200 epoch, 128 hidden dim, lr = 0.001 - .797 precision!
+# 200 epoch, 128 hidden dim, lr = 0.0005 - .791 precision.
+# 200 epoch, 128 hidden_dim, lr = 0.0005, 4 heads _ precision
+# 200 epoch, 3 layers, 128 hidden_dim - _ - eval precision actually dropped.
+
+# """
+# In PyG’s MessagePassing pattern, a single propagation pass is broken into three steps:
+# message() - Computes per-edge messages (e.g. attention-weighted features).
+# aggregate() - Gathers those messages at each target node (sum/mean/max over incoming edges).
+# update() -Takes the aggregated result and “finishes” it—e.g. applies bias, non-linearities, normalization, or (here) collapses the attention heads.
+# """
