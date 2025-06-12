@@ -20,4 +20,37 @@ GraphSAGE is an *inductive* method.
 GraphSAGE loss function is unsupervised, and uses two distinct terms to ensure that neighboring vertices have similar embeddings and distant or disconnected vertices have embeddings which are numerically far apart.
 This ensures that the calculated vertex embeddings are highly discriminative.
 
+(experimentally) LSTM aggregation in GraphSAGE is the most powerful aggregator, however it introduces high complexity during training - >30 times increase in training time.
 
+# Spectral approaches
+Spectral approaches are expensive and generally not SOTA. They are also a specific case of other network, and classifying them as spectral/spatial is limiting.
+Spectral approaches are grounded in signal processing theory.
+GCN and GAT and GraphSAGE are spatial approaches.
+
+# Graph Autoencoders
+(As usual,) autoencoders encode into a latent space and then decode this compressed representation to reconstruct the original input data. They are trained to minimize the *reconstruction loss*
+
+Difference between AEs to GAEs is that encoders and decoders take in and put out graph structures respectively. One of the most common methods is to replace the encoder with a CGNN and replace the decoder with a method that can reconstruct the graph structure of the input.
+
+
+Once trained, GAEs (like AEs) can be split into their component networks to perform specific downstream tasks. A popular usecase for the encoder is to generating robust embeddings for supervised downstream tasks (e.g. classification, visualization, regression, clustering), and a use for the decoder is to generate new graph instances that include properties from the original dataset. This allows the generation of large synthetic datasets
+
+## VGAE
+Rather than representing inputs as single points in the latent space, variational autoencoders learn to encode inputs as probability distributions in the latent space, and they sample a distribution from them rather than getting them directly.
+
+Unlike in GAEs - where the loss is the mean squared error between the input and the reconstructed output, a VGAE's loss imposes an additional penalty which ensures that the latent distributions are normalised. More specifically, this term regularizes the latent space distributions by ensuring that they do not diverge significantly from some prior distributions with desirable properties. E.g., we use the normal distribution `N(0,1)`. This divergence is quantified in our case using **Kullback-Leiber** (denoted as "KL") divergence is used as the normal distribution, though other similarity metrics (e.g. Wasserstein space distance or ranking loss) can be used successfully. Without this loss penalty, the VGAE encoder might generate distributions with small variances or high magnitude means: both of which would make it harder to sample from the distribution effectively.
+
+(next: implement VGAE.. how to generate graph structures?)
+
+(##### note: there was very interesting work on generation of 3d models that used sparsity in reconstruction... how? they actually used diffusion.)
+
+# GAdvT (Graph Adversarial Networks)
+
+The robustness of graph neural networks can be improved with Graph Adversarial Techniques. Here, the AI model acts as an adversary to another during training to mutually improve the performance of both models in tandem. (Generative Adversarial Network adopted to graphs description follows). 
+
+As with traditional adversarial techniques, common goals for GAdvTs include:
+* Improving the robustness, regularisation, or distribution of learned embeddings.
+* Improving the robustness of models to targeted attacks.
+* Training generative AI models.
+
+(Note: GATs can be split to be used as both the discriminator and the generator, which is useful for both.)
