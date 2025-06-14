@@ -54,3 +54,32 @@ As with traditional adversarial techniques, common goals for GAdvTs include:
 * Training generative AI models.
 
 (Note: GATs can be split to be used as both the discriminator and the generator, which is useful for both.)
+
+# GraphVAE
+
+Encoder:
+GCN with gated pooling - a paradigm specifically for graphs. 
+Gated pooling operates over all nodes simultaneously, multiplying a single learnable parameter over all of them and summing all features.
+
+Flipping a single pixel in MNIST generation is of no issue, however adding a single atom or bond makes the prediction invalid, thus making the prediction more challenging.
+
+GraphVAE uses dense generation for all atoms, and connections, so the decoder uses:
+1. 3 shared MLPs,
+2. Followed by:
+    - A dense net for link prediction (num_atoms * num_atoms)
+    - A dense net for edge feature prediction (num_atoms * num_atoms * num_edge_features)
+    - A dense net for edge feature prediction (num_atoms * num_atom_features)
+
+Not convolutional or recurrent layers (Which would make generation simpler.)
+
+GraphVAE discards hydrogen atoms on QM9 to make prediction for the model easier.
+
+GraphVAE reconstructs only the upper triangle of the graph since it is enough for generation, and mirrors (?) the bottom half.
+On the other hand, we can use a "trick" for undirected edges to sum up the outputs of a decoder with itself, which results in a perfectly aligned output edge and edge feature prediction matrix. Normally, a triu mask would be used, but this is more stable because it reduces search space.
+
+~~In link prediction:
+ - **Accuracy** - of all labels, how many were actually accurate?
+ - **Precision** - of all labels that were positive, how many were actually positive? true_positives/(true_positives/false_positives)~~
+
+### graph matching
+Because the ground truth is assumed to have non-unique node ordering, we first must align the generated graph with the ground truth for supervised reconstruction loss. GraphVAE uses Max Pooling Matching (MPM) which is used to align predicted and ground truth graphs before computing the reconstruction loss.
