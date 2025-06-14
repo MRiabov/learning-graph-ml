@@ -188,6 +188,7 @@ class GraphVAE(nn.Module):
 
 def reconstruction_loss(adj_probs, node_logits, edge_logits, batch_y: Batch):
     B, N, node_C = node_logits.shape
+    edge_C = edge_logits.shape[-1]
     edge_classes_y = to_dense_adj(
         batch_y.edge_index,
         batch.batch,
@@ -201,20 +202,22 @@ def reconstruction_loss(adj_probs, node_logits, edge_logits, batch_y: Batch):
     node_classes_y, _node_mask = to_dense_batch(
         batch.z, batch.batch, max_num_nodes=9, batch_size=batch.num_graphs
     )
+    #NOTE
 
     # --- Graph matching ---
     K = build_affinity_matrix(node_logits, node_classes_y)  # (B, N*N)
     x = mpm_batch(K)
     perm = mpm_to_perm_batch(x, N)
+    perm_t = perm.transpose(1, 2)
 
     # --- apply perm matrix ---
-    perm_t = perm.transpose(1, 2)
-    adj_probs_perm = torch.bmm(torch.bmm(perm_t, adj_probs), perm)
-    node_logits_perm = torch.bmm(perm.transpose(1, 2), node_logits)  # (B, N, C)
-    edge_logits_perm = torch.matmul(
-        torch.matmul(perm_t.unsqueeze(-1), edge_logits), perm.unsqueeze(1)
+    adj_probs_perm = torch.einsum(
+        "bij,bjk,bkl->bil", perm.transpose(1, 2), adj_probs, perm
     )
-    # ^ tldr: this applies permutation matrix. It could also be done with einsum, but this is also OK.
+    node_logits_perm = torch.bmm(perm.transpose(1, 2), node_logits)
+    edge_logits_perm = torch.einsum(
+        "bij,bjkl,bkm->bilm", perm.transpose(1, 2), edge_logits, perm
+    )
 
     adj_loss = F.binary_cross_entropy_with_logits(adj_probs_perm, edge_mask)
     # node_logits = node_logits_perm.permute(0, 2, 1)  # put the class logits onto 2nd dim.
@@ -225,8 +228,7 @@ def reconstruction_loss(adj_probs, node_logits, edge_logits, batch_y: Batch):
     )
     # `F.cross_entropy` demands a 2 or 3d array. so reshape it to 2d and back up
     edge_feat_loss = F.cross_entropy(
-        edge_logits_perm.reshape(-1, edge_logits_perm.shape[-1]),
-        edge_classes_y.reshape(-1),
+        edge_logits_perm.reshape(-1, edge_C), edge_classes_y.reshape(-1)
     )
     recon_loss = adj_loss + node_feat_loss + edge_feat_loss
     return recon_loss
@@ -361,56 +363,56 @@ if __name__ == "__main__":
 
                 # NEXT: learn components of GraphVAE. There is still a lot to learn.
 
-                # # Convert to dense adjacency and node feature tensors
-                # edge_classes_y = to_dense_adj(
-                #     val_batch.edge_index,
-                #     val_batch.batch,
-                #     max_num_nodes=9,
-                #     batch_size=val_batch.num_graphs,
-                #     edge_attr=val_batch.edge_attr,
-                # ).argmax(dim=-1)  # (B, N, N)
-                # edge_mask = edge_classes_y != 0  # Assume class 0 means "no edge"
+                # Convert to dense adjacency and node feature tensors
+                edge_classes_y = to_dense_adj(
+                    val_batch.edge_index,
+                    val_batch.batch,
+                    max_num_nodes=9,
+                    batch_size=val_batch.num_graphs,
+                    edge_attr=val_batch.edge_attr,
+                ).argmax(dim=-1)  # (B, N, N)
+                edge_mask = edge_classes_y != 0  # Assume class 0 means "no edge"
 
-                # # FIXME: I don't include 0 edge class!
-                # dense_node_classes_y, node_mask = to_dense_batch(
-                #     val_batch.z,  # ground-truth node classes
-                #     val_batch.batch,
-                #     max_num_nodes=9,
-                #     batch_size=val_batch.num_graphs,
-                # )
+                # FIXME: I don't include 0 edge class!
+                dense_node_classes_y, node_mask = to_dense_batch(
+                    val_batch.z,  # ground-truth node classes
+                    val_batch.batch,
+                    max_num_nodes=9,
+                    batch_size=val_batch.num_graphs,
+                )
 
-                # # Forward pass
-                # adj_logits, node_logits, edge_logits, loc, scale = model(val_batch)
-                # pred_edge_presence = torch.sigmoid(adj_logits) > 0.5
-                # pred_edge_classes = edge_logits.argmax(dim=-1)
-                # pred_node_classes = node_logits.argmax(dim=-1)
+                # Forward pass
+                adj_logits, node_logits, edge_logits, loc, scale = model(val_batch)
+                pred_edge_presence = torch.sigmoid(adj_logits) > 0.5
+                pred_edge_classes = edge_logits.argmax(dim=-1)
+                pred_node_classes = node_logits.argmax(dim=-1)
 
-                # # Node classification accuracy
-                # node_accuracy = (
-                #     (pred_node_classes == dense_node_classes_y)[node_mask]
-                #     .float()
-                #     .mean()
-                # )
+                # Node classification accuracy
+                node_accuracy = (
+                    (pred_node_classes == dense_node_classes_y)[node_mask]
+                    .float()
+                    .mean()
+                )
 
-                # # Edge classification accuracy (only for present edges)
-                # edge_accuracy = (
-                #     (pred_edge_classes == edge_classes_y)[edge_mask].float().mean()
-                # )
+                # Edge classification accuracy (only for present edges)
+                edge_accuracy = (
+                    (pred_edge_classes == edge_classes_y)[edge_mask].float().mean()
+                )
 
-                # # Link prediction metrics
-                # link_labels = edge_mask.float().view(-1)  # binary: edge present or not
-                # link_scores = torch.sigmoid(adj_logits).view(-1)
+                # Link prediction metrics
+                link_labels = edge_mask.float().view(-1)  # binary: edge present or not
+                link_scores = torch.sigmoid(adj_logits).view(-1)
 
-                # roc_auc = roc_auc_score(link_labels.cpu(), link_scores.cpu())
-                # ap_score = average_precision_score(link_labels.cpu(), link_scores.cpu())
+                roc_auc = roc_auc_score(link_labels.cpu(), link_scores.cpu())
+                ap_score = average_precision_score(link_labels.cpu(), link_scores.cpu())
 
-                # print(
-                #     f"Epoch {epoch}/{epochs} | "
-                #     f"Link ROC-AUC: {roc_auc:.4f} | "
-                #     f"Link AP: {ap_score:.4f} | "
-                #     f"Node Acc: {node_accuracy:.4f} | "  # node classes are predicted well?
-                #     f"Edge Acc: {edge_accuracy:.4f}"  # however edge features are not at all.
-                # )
+                print(
+                    f"Epoch {epoch}/{epochs} | "
+                    f"Link ROC-AUC: {roc_auc:.4f} | "
+                    f"Link AP: {ap_score:.4f} | "
+                    f"Node Acc: {node_accuracy:.4f} | "  # node classes are predicted well?
+                    f"Edge Acc: {edge_accuracy:.4f}"  # however edge features are not at all.
+                )
 
     # save net
     torch.save(model, "graph_generation/checkpoints/graphvae_qm9.pt")

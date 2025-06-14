@@ -124,7 +124,6 @@ def compute_kl_divergence(loc, log_std):
     )
 
 
-# next: implement vgae.
 if __name__ == "__main__":
     # note: the goal of the dataset is to predict the label which the graph has.
     batch_dataset = Planetoid("datasets/cora/", "Cora", transform=NormalizeFeatures())
